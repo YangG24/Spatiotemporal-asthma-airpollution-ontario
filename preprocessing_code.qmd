@@ -1,0 +1,470 @@
+---
+title: "6500 Project: Asthma Incidence Analysis"
+author: "Group 10"
+format: pdf
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tigris_use_cache = TRUE)
+```
+
+```{r, message=FALSE, include=FALSE}
+library(readr)
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(tidyr)
+library(stringr)
+```
+
+
+### PM2.5 in 2013
+```{r}
+# Read the CSV, skip first 7 lines
+PM25_2013 <- read_csv(
+  file = "Asthma_Air pollution Project/Air_pollution_Canada_2013_2022/PM25_2013.csv",
+  skip = 7,
+  n_max = 79570
+)
+
+# Clean column names (keep part before "//" and trim whitespace)
+colnames(PM25_2013) <- sapply(colnames(PM25_2013), function(col) {
+  str_trim(strsplit(col, "//")[[1]][1])
+})
+
+# Filter for Ontario
+ontario_PM25_2013 <- PM25_2013 %>%
+  filter(`Province/Territory` == "ON")
+
+# Show column names and row counts
+print(colnames(PM25_2013))
+cat("All rows:", nrow(PM25_2013), "\n")
+cat("Ontario rows:", nrow(ontario_PM25_2013), "\n")
+```
+
+
+```{r}
+# Unique values in City
+num_cities <- ontario_PM25_2013 %>%
+  pull(City) %>%
+  unique() %>%
+  na.omit() %>%
+  length()
+
+cat("Total unique cities:", num_cities, "\n")
+
+unique_cities <- unique(na.omit(ontario_PM25_2013$City))
+cat("Unique city names:\n")
+print(unique_cities)
+
+city_counts <- table(ontario_PM25_2013$City)
+cat("\nObservations per city:\n")
+print(city_counts)
+
+# Number of unique stations per city
+station_counts <- ontario_PM25_2013 %>%
+  group_by(City) %>%
+  summarise(n_stations = n_distinct(`NAPS ID`))
+print(station_counts)
+
+# Convert Date column to Date format
+ontario_PM25_2013$Date <- as.Date(ontario_PM25_2013$Date, format = "%Y-%m-%d")
+str(ontario_PM25_2013$Date)
+
+# Define hourly columns H01 to H24
+hour_cols <- sprintf("H%02d", 1:24)
+
+# Replace -999 with NA
+ontario_PM25_2013[hour_cols] <- lapply(ontario_PM25_2013[hour_cols], function(x) {
+  replace(x, x == -999, NA)
+})
+```
+
+## Calculating 3h Max for each day and each station
+
+3h Max (short for 3-hour maximum) is a common metric used in air quality and environmental monitoring. It refers to the maximum average concentration of a pollutant measured over any consecutive 3-hour period within a day.
+
+```{r}
+# Compute 3-hour rolling average and take max
+ontario_PM25_2013$PM25_3hMax <- apply(ontario_PM25_2013[hour_cols], 1, function(row) {
+  max(rollapply(row, width = 3, FUN = mean, align = "left", na.rm = TRUE, fill = NA), na.rm = TRUE)
+}) %>% round(2)
+
+# Preview
+print(head(ontario_PM25_2013[, c("Date", "PM25_3hMax")]))
+
+# Count unique 3h max values
+counts_3hMax <- table(ontario_PM25_2013$PM25_3hMax)
+print(counts_3hMax)
+```
+
+
+## Calculating 8h Max For each day and each station
+```{r}
+# Compute 8-hour rolling average and take max
+ontario_PM25_2013$PM25_8hMax <- apply(ontario_PM25_2013[hour_cols], 1, function(row) {
+  max(rollapply(row, width = 8, FUN = mean, align = "left", na.rm = TRUE, fill = NA), na.rm = TRUE)
+}) %>% round(2)
+
+# Preview
+print(head(ontario_PM25_2013[, c("Date", "PM25_8hMax")]))
+
+# 13. Count unique 8h max values
+counts_8hMax <- table(ontario_PM25_2013$PM25_8hMax)
+print(counts_8hMax)
+
+```
+
+## Annual Max 3-hour/8-hour Average PM2.5 Concentration for each Station (NAPS ID )/City
+```{r}
+# Extract year
+ontario_PM25_2013$Year <- year(ontario_PM25_2013$Date)
+
+# Group by Year, City, NAPS ID and compute mean
+PM25_annual_mean_2013 <- ontario_PM25_2013 %>%
+  group_by(Year, City, `NAPS ID`) %>%
+  summarise(
+    Pollutant = first(Pollutant),
+    Latitude = first(Latitude),
+    Longitude = first(Longitude),
+    PM25_annu_mean_3hMax = mean(PM25_3hMax, na.rm = TRUE),
+    PM25_annu_mean_8hMax = mean(PM25_8hMax, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(Year, City, `NAPS ID`)
+
+# Inspect results
+print(head(PM25_annual_mean_2013))
+str(PM25_annual_mean_2013)
+```
+
+Check missing values for annual_max_3h and annual_max_8h. The station '60304' in Kingston never produced any valid data in 2013, need to check other years to see how to cope this issue
+
+```{r}
+# Stations with no valid daily 3hMax
+zero_3h <- ontario_PM25_2013 %>%
+  group_by(`NAPS ID`) %>%
+  summarise(valid_3h = sum(!is.na(PM25_3hMax))) %>%
+  filter(valid_3h == 0)
+
+cat("Stations with no valid 3hMax days:\n")
+print(zero_3h)
+
+# Stations with no valid daily 8hMax
+zero_8h <- ontario_PM25_2013 %>%
+  group_by(`NAPS ID`) %>%
+  summarise(valid_8h = sum(!is.na(PM25_8hMax))) %>%
+  filter(valid_8h == 0)
+
+cat("\nStations with no valid 8hMax days:\n")
+print(zero_8h)
+
+# Inspect one station's data
+bad_id <- zero_3h$`NAPS ID`[1]
+cat(sprintf("\nDaily 3hMax for station %s:\n", bad_id))
+print(ontario_PM25_2013 %>%
+        filter(`NAPS ID` == bad_id) %>%
+        select(Date, PM25_3hMax) %>%
+        head(10))
+
+# Save to CSV
+write_csv(PM25_annual_mean_2013, "cleaned_datasets/PM25_2013_ontario_annual_by_station.csv")
+
+```
+
+
+
+## NO2 in 2013
+```{r}
+# Read the 2013 NO2 file, skipping the first 7 lines of metadata
+NO2_2013 <- read_csv(
+  file = "Asthma_Air pollution Project/Air_pollution_Canada_2013_2022/NO2_2013.csv",
+  skip = 7,               # Skip the first 7 lines (metadata)
+  n_max = 60955           # Read only the next 60,955 rows
+)
+
+# Keep only the English part of each column name (text before "//") and strip whitespace
+names(NO2_2013) <- str_trim(sapply(strsplit(names(NO2_2013), "//"), `[`, 1))
+
+# Filter for Ontario
+ontario_NO2_2013 <- NO2_2013 %>%
+  filter(`Province/Territory` == "ON")
+
+# Verify cleaned column names and dataset shapes
+print(names(NO2_2013))
+cat("All rows:", nrow(NO2_2013), ", Ontario rows:", nrow(ontario_NO2_2013), "\n")
+```
+
+
+
+```{r}
+# Number of unique cities (excluding NA)
+num_cities <- ontario_NO2_2013 %>%
+  filter(!is.na(City)) %>%
+  distinct(City) %>%
+  nrow()
+
+cat("Total unique cities:", num_cities, "\n")
+
+# List of unique city names (excluding NA)
+unique_cities <- ontario_NO2_2013 %>%
+  filter(!is.na(City)) %>%
+  distinct(City) %>%
+  pull(City)
+
+cat("Unique city names:\n")
+print(unique_cities)
+
+# Number of observations per city
+city_counts <- ontario_NO2_2013 %>%
+  count(City, sort = TRUE)
+
+cat("\nObservations per city:\n")
+print(city_counts)
+```
+
+
+
+```{r}
+# Convert 'Date' column from character to Date format
+ontario_NO2_2013$Date <- as.Date(ontario_NO2_2013$Date, format = "%Y-%m-%d")
+
+# Display structure of the data frame
+str(ontario_NO2_2013)
+```
+
+
+## Calculating 3h Max for each day and each station
+```{r}
+# Define the hourly columns H01 through H24
+hour_cols <- sprintf("H%02d", 1:24)
+
+# Replace invalid values (-999) with NA
+ontario_NO2_2013[hour_cols] <- lapply(ontario_NO2_2013[hour_cols], function(col) {
+  ifelse(col == -999, NA, col)
+})
+
+# Compute 3-hour rolling average for each row, then take the max of those averages
+ontario_NO2_2013$NO2_3hMax <- apply(ontario_NO2_2013[hour_cols], 1, function(row) {
+  max(rollmean(row, k = 3, align = "left", na.pad = TRUE), na.rm = TRUE)
+}) %>% round(2)
+
+# Print the first few rows with the new column
+print(head(ontario_NO2_2013[, c("Date", "NO2_3hMax")]))
+```
+
+
+## Calculating 8h Max for each day and station
+```{r}
+# Define the hourly columns H01 through H24
+hour_cols <- sprintf("H%02d", 1:24)
+
+# Replace invalid values (-999) with NA
+ontario_NO2_2013[hour_cols] <- lapply(ontario_NO2_2013[hour_cols], function(col) {
+  ifelse(col == -999, NA, col)
+})
+
+# Compute the 8-hour rolling average for each row, then take the max of those averages
+ontario_NO2_2013$NO2_8hMax <- apply(ontario_NO2_2013[hour_cols], 1, function(row) {
+  max(rollmean(row, k = 8, align = "left", na.pad = TRUE), na.rm = TRUE)
+}) %>% round(2)
+
+# Print the first few rows with the new column
+print(head(ontario_NO2_2013[, c("Date", "NO2_8hMax")]))
+```
+
+
+## Annual Max 3hr/8hr Average NO2 Concentration for each station
+```{r}
+# Extract the year from the Date column
+ontario_NO2_2013 <- ontario_NO2_2013 %>%
+  mutate(Year = year(Date))
+
+# Group by Year, City, and NAPS ID to compute annual means and carry station metadata
+NO2_annual_mean_2013 <- ontario_NO2_2013 %>%
+  group_by(Year, City, `NAPS ID`) %>%
+  summarise(
+    Pollutant = first(Pollutant),
+    Latitude = first(Latitude),
+    Longitude = first(Longitude),
+    NO2_annu_mean_3hMax = mean(NO2_3hMax, na.rm = TRUE),
+    NO2_annu_mean_8hMax = mean(NO2_8hMax, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Sort the results for readability
+NO2_annual_mean_2013 <- NO2_annual_mean_2013 %>%
+  arrange(Year, City, `NAPS ID`)
+
+# Inspect the first few rows
+print(head(NO2_annual_mean_2013))
+
+# Check the structure of the result
+str(NO2_annual_mean_2013)
+
+```
+
+
+Checking Missing values for annual_max_3h & annual_max_8h
+```{r}
+# Stations with zero valid 3hMax values
+zero_3h <- ontario_NO2_2013 %>%
+  group_by(`NAPS ID`) %>%
+  summarise(valid_3hMax = sum(!is.na(NO2_3hMax))) %>%
+  filter(valid_3hMax == 0)
+
+cat("Stations with no valid 3hMax days:\n")
+print(zero_3h)
+
+# Stations with zero valid 8hMax values
+zero_8h <- ontario_NO2_2013 %>%
+  group_by(`NAPS ID`) %>%
+  summarise(valid_8hMax = sum(!is.na(NO2_8hMax))) %>%
+  filter(valid_8hMax == 0)
+
+cat("\nStations with no valid 8hMax days:\n")
+print(zero_8h)
+
+# Inspect one of the stations with no valid 3hMax values
+if (nrow(zero_3h) > 0) {
+  bad_id <- zero_3h$`NAPS ID`[1]
+  
+  cat(paste0("\nDaily 3hMax for station ", bad_id, ":\n"))
+  print(
+    ontario_NO2_2013 %>%
+      filter(`NAPS ID` == bad_id) %>%
+      select(Date, NO2_3hMax) %>%
+      head(10)
+  )
+}
+```
+
+
+### O3 in 2013
+```{r}
+# Read the 2013 O3 file, skipping first 7 metadata lines
+O3_2013 <- read_csv(
+  "Asthma_Air pollution Project\Air_pollution_Canada_2013_2022\O3_2013.csv",
+  skip = 7,
+  n_max = 78475
+)
+
+# Clean column names: keep only English part before "//" and trim whitespace
+names(O3_2013) <- sapply(strsplit(names(O3_2013), "//"), function(x) trimws(x[1]))
+
+# Filter for Ontario
+ontario_O3_2013 <- O3_2013 %>%
+  filter(`Province/Territory` == "ON")
+
+# Show column names and dimensions
+print(names(O3_2013))
+cat("All rows:", nrow(O3_2013), "Ontario rows:", nrow(ontario_O3_2013), "\n")
+
+# Unique city count and values
+num_cities <- n_distinct(ontario_O3_2013$City, na.rm = TRUE)
+cat("Total unique cities:", num_cities, "\n")
+cat("Unique city names:\n")
+print(unique(ontario_O3_2013$City))
+```
+
+
+```{r}
+# Observations per city
+print(table(ontario_O3_2013$City))
+
+# Number of stations per city
+station_counts <- ontario_O3_2013 %>%
+  group_by(City) %>%
+  summarise(stations = n_distinct(`NAPS ID`))
+print(station_counts)
+
+# Convert 'Date' to Date type
+ontario_O3_2013$Date <- ymd(ontario_O3_2013$Date)
+
+# Define hour columns
+hour_cols <- sprintf("H%02d", 1:24)
+
+# Replace -999 with NA
+ontario_O3_2013[hour_cols] <- lapply(ontario_O3_2013[hour_cols], function(x) replace(x, x == -999, NA))
+```
+
+
+## Calculating 3h & 8h Max for each day and each station
+```{r}
+# Compute 3-hour rolling max per row
+ontario_O3_2013$O3_3hMax <- apply(ontario_O3_2013[hour_cols], 1, function(row) {
+  round(max(rollapply(row, width = 3, FUN = mean, fill = NA, align = "left", na.rm = TRUE), na.rm = TRUE), 2)
+})
+
+# Compute 8-hour rolling max per row
+ontario_O3_2013$O3_8hMax <- apply(ontario_O3_2013[hour_cols], 1, function(row) {
+  round(max(rollapply(row, width = 8, FUN = mean, fill = NA, align = "left", na.rm = TRUE), na.rm = TRUE), 2)
+})
+
+# Preview rolling max
+print(head(ontario_O3_2013[, c("Date", "O3_3hMax", "O3_8hMax")]))
+
+# Count frequency of values
+counts_3hMax <- table(ontario_O3_2013$O3_3hMax, useNA = "ifany")
+counts_8hMax <- table(ontario_O3_2013$O3_8hMax, useNA = "ifany")
+print(counts_3hMax)
+print(counts_8hMax)
+
+# Extract year
+ontario_O3_2013$Year <- year(ontario_O3_2013$Date)
+```
+
+
+## Annual Max 3h/8h Average O3 Concentration for each Station/City
+```{r}
+# Group by Year, City, and NAPS ID and calculate annual means
+O3_annual_mean_2013 <- ontario_O3_2013 %>%
+  group_by(Year, City, `NAPS ID`) %>%
+  summarise(
+    Pollutant = first(Pollutant),
+    Latitude = first(Latitude),
+    Longitude = first(Longitude),
+    O3_annu_mean_3hMax = mean(O3_3hMax, na.rm = TRUE),
+    O3_annu_mean_8hMax = mean(O3_8hMax, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Year, City, `NAPS ID`)
+
+print(head(O3_annual_mean_2013))
+str(O3_annual_mean_2013)
+
+# Stations with no valid 3hMax days
+zero_3h <- ontario_O3_2013 %>%
+  group_by(`NAPS ID`) %>%
+  summarise(valid_3h = sum(!is.na(O3_3hMax))) %>%
+  filter(valid_3h == 0)
+print("Stations with no valid 3hMax days:")
+print(zero_3h)
+
+# Stations with no valid 8hMax days
+zero_8h <- ontario_O3_2013 %>%
+  group_by(`NAPS ID`) %>%
+  summarise(valid_8h = sum(!is.na(O3_8hMax))) %>%
+  filter(valid_8h == 0)
+print("Stations with no valid 8hMax days:")
+print(zero_8h)
+
+# Inspect first 10 days for one bad station (3hMax)
+if (nrow(zero_3h) > 0) {
+  bad_id <- zero_3h$`NAPS ID`[1]
+  cat(paste("Daily 3hMax for station", bad_id, ":\n"))
+  print(
+    ontario_O3_2013 %>%
+      filter(`NAPS ID` == bad_id) %>%
+      select(Date, O3_3hMax) %>%
+      head(10)
+  )
+}
+
+```
+
+```{r}
+
+```
