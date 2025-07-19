@@ -1,0 +1,186 @@
+---
+title: "6500 Project: Asthma Incidence Analysis"
+author: "Group 10"
+format: pdf
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tigris_use_cache = TRUE)
+```
+
+```{r, message=FALSE, include=FALSE}
+library(readr)
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(tidyr)
+library(stringr)
+library(progressr)
+```
+
+### O3 in 2013
+
+```{r, message=FALSE}
+# air_pollutants to process
+air_pollutants = c("NO2", "O3", "PM25")
+
+# year ranges to process data with
+year_ranges = 2013:2022
+
+
+# Create all combinations
+combinations <- expand.grid(pollutant = air_pollutants, year = year_ranges, stringsAsFactors = FALSE)
+
+# Named list alternative
+pollution_data <- list()
+
+for (i in seq_len(nrow(combinations))) {
+  pollutant <- combinations$pollutant[i]
+  year <- combinations$year[i]
+  key <- sprintf("%s_%d", pollutant, year)
+  file_path <- sprintf("Asthma_Air pollution Project/Air_pollution_Canada_2013_2022/%s_%d.csv", pollutant, year)
+  pollution_data[[key]] <- read_csv(file_path, skip = 7)
+}
+```
+
+
+```{r}
+
+hour_cols <- sprintf("H%02d", 1:24)
+
+handlers("rstudio")  # For progress display
+handlers(global = TRUE)
+
+
+with_progress({
+  p <- progressor(along = pollution_data)
+
+  # This will store a list of cleaned data frames
+  cleaned_pollution_data <- list()
+  # This will store the annual summary for each dataset
+  annual_means_list <- list()
+
+  for (i in seq_along(pollution_data)) {
+    p()  # update progress bar
+    df <- pollution_data[[i]]
+
+    clean_names <- sapply(strsplit(names(df), "//"), function(x) trimws(x[1]))
+    df <- setNames(df, clean_names)
+
+    df <- df %>%
+      rename(naps_id = "NAPS ID") %>%
+      filter(`Province/Territory` == "ON") %>%
+      mutate(
+        Date = ymd(Date),
+        Year = year(Date),
+        Month = month(Date),
+        biweek = (isoweek(Date) - 1) %/% 2 + 1
+      )
+
+    # Long format
+    df_long <- df %>%
+      pivot_longer(cols = all_of(hour_cols), names_to = "Hour", values_to = "Value") %>%
+      mutate(Value = na_if(Value, -999))
+
+    # Means
+    hour_means <- df_long %>%
+      group_by(City, naps_id, biweek, Hour) %>%
+      summarise(mean_val = mean(Value, na.rm = TRUE), .groups = "drop")
+
+    overall_means <- df_long %>%
+      group_by(Date, Hour) %>%
+      summarise(overall_val = mean(Value, na.rm = TRUE), .groups = "drop")
+
+    # Impute
+    df_long <- df_long %>%
+      left_join(hour_means, by = c("City", "naps_id", "biweek", "Hour")) %>%
+      left_join(overall_means, by = c("Date", "Hour")) %>%
+      mutate(Value = coalesce(Value, mean_val, overall_val)) %>%
+      dplyr::select(-mean_val, -overall_val)
+
+    # Wide again
+    df_wide <- df_long %>%
+      pivot_wider(names_from = Hour, values_from = Value)
+
+    # Add non-hour columns back
+    df_wide <- df %>%
+      dplyr::select(-all_of(hour_cols)) %>%
+      bind_cols(df_wide)
+
+    # Compute rolling stats
+    hour_matrix <- df_wide %>%
+      dplyr::select(all_of(hour_cols)) %>%
+      as.matrix()
+
+    df_wide$threeHrMax <- apply(hour_matrix, 1, function(row) {
+      roll_vals <- rollapply(row, width = 3, FUN = mean, fill = NA, align = "left", na.rm = TRUE)
+      if (all(is.na(roll_vals))) NA else round(max(roll_vals, na.rm = TRUE), 2)
+    })
+
+    df_wide$eightHrMax <- apply(hour_matrix, 1, function(row) {
+      roll_vals <- rollapply(row, width = 8, FUN = mean, fill = NA, align = "left", na.rm = TRUE)
+      if (all(is.na(roll_vals))) NA else round(max(roll_vals, na.rm = TRUE), 2)
+    })
+
+    
+    
+    df_wide <- df_wide %>%
+      rename(
+        Date = names(df_wide)[grepl("^Date\\.\\.\\.", names(df_wide))][1],  # First "Date..."
+        Year = names(df_wide)[grepl("^Year\\.\\.\\.", names(df_wide))][1],   # First "Year..."
+        City = names(df_wide)[grepl("^City\\.\\.\\.", names(df_wide))][1],   # First "City..."
+        Pollutant = names(df_wide)[grepl("^Pollutant\\.\\.\\.", names(df_wide))][1],
+        Latitude = names(df_wide)[grepl("^Latitude\\.\\.\\.", names(df_wide))][1],
+        Longitude = names(df_wide)[grepl("^Longitude\\.\\.\\.", names(df_wide))][1],
+        naps_id = names(df_wide)[grepl("^naps_id\\.\\.\\.", names(df_wide))][1],
+      ) %>%
+      dplyr::select(-matches("\\.\\.\\."))  # Drop remaining duplicates
+    
+
+    # Store cleaned dataset
+    cleaned_pollution_data[[i]] <- df_wide
+    
+    
+    # Extract pollutant name and year range
+    pollutant <- unique(df_wide$Pollutant)[1]  
+    years <- unique(df_wide$Year)
+
+    # Compute annual summary
+    annual_summary <- df_wide %>%
+      group_by(Year, City, naps_id) %>%
+      summarise(
+        Pollutant = first(Pollutant),
+        Latitude = first(Latitude),
+        Longitude = first(Longitude),
+        annual_mean_3hMax = mean(threeHrMax, na.rm = TRUE),
+        annual_mean_8hMax = mean(eightHrMax, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      arrange(Year, City, naps_id)
+    
+    
+    # Generate dynamic filename
+    filename <- sprintf(
+      "cleaned_datasets/%s_%d_ontario_annual_by_station.csv",
+      pollutant,
+      yr
+    )
+        
+    # Split annual summary by year and save with correct names
+    for (yr in years) {
+      annual_subset <- annual_summary %>% filter(Year == yr)
+      list_name <- paste0(pollutant, "_", yr)  # e.g., "O3_2013"
+      annual_means_list[[list_name]] <- annual_subset  # Store in named list
+    }
+    
+    # Saving CSV files
+    for (name in names(annual_means_list)) {
+      write.csv(annual_means_list[[name]], 
+                file = filename, 
+                row.names = FALSE)
+    }
+  }
+})
+```
