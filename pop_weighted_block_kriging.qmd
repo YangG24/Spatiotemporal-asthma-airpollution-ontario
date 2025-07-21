@@ -1,0 +1,193 @@
+---
+title: "6500 Project: Asthma Incidence Analysis"
+author: "Group 5"
+format: pdf
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tigris_use_cache = TRUE)
+```
+1. Load libraries
+```{r, message=FALSE, include=FALSE}
+library(sf)
+library(sp)
+library(raster)
+library(gstat)
+library(exactextractr)
+library(tidyverse)
+library(dplyr)
+```
+2. Read and prepare PHU boundaries & population raster
+
+```{r,echo=FALSE}
+unzip("PHU_BOUNDARY.zip", exdir = "PHU_BOUNDARY")
+phu <- st_read(
+  list.files("PHU_BOUNDARY", "\\.shp$", full.names=TRUE)[1]
+) %>%
+  rename(PHU = NAME_ENG)
+
+phu <- st_make_valid(phu)  #fix invalid PHU, like Lambton 
+pop_rast <- raster("can_pd_2017.tif")
+common_crs <- crs(pop_rast)
+
+phu      <- st_transform(phu, common_crs)
+pop_rast <- pop_rast %>% crop(extent(phu)) %>% mask(phu)
+
+```
+3. Read and combine all pollutants
+
+```{r, include=FALSE}
+pollutants <- c("PM2.5", "NO2", "O3")
+all_data <- list()
+
+for (pol in pollutants) {
+  files <- list.files(
+    path = "cleaned_datasets",
+    pattern = paste0("^", pol, "_\\d{4}_ontario_annual_by_station\\.csv$"),
+    full.names = TRUE
+  )
+  
+  df <- map_dfr(files, ~ read_csv(.x)) %>%
+    filter(Pollutant == pol) %>%
+    mutate(
+      metric_3h = case_when(
+        pol == "PM2.5" ~ "PM25_3h",
+        pol == "NO2"   ~ "NO2_3h",
+        pol == "O3"    ~ "O3_3h"
+      ),
+      metric_8h = case_when(
+        pol == "PM2.5" ~ "PM25_8h",
+        pol == "NO2"   ~ "NO2_8h",
+        pol == "O3"    ~ "O3_8h"
+      )
+    ) %>%
+    rename(
+      val_3h = annual_mean_3hMax,
+      val_8h = annual_mean_8hMax
+    ) %>%
+    pivot_longer(
+      cols = c(val_3h, val_8h),
+      names_to = "avg_type",
+      values_to = "val"
+    ) %>%
+    mutate(
+      metric = ifelse(avg_type == "val_3h", metric_3h, metric_8h)
+    ) %>%
+    select(Year, Latitude, Longitude, metric, val)
+  
+  all_data[[pol]] <- df
+}
+
+all_pollutants <- bind_rows(all_data)
+
+```
+4. Create spatial grid
+
+```{r,echo=FALSE}
+pop_masked <- pop_rast %>% crop(extent(phu)) %>% mask(phu)
+grid_pts   <- rasterToPoints(pop_masked, spatial=TRUE)
+
+```
+
+5. Kriging per year & metric
+
+```{r, echo=FALSE}
+
+years   <- 2013:2022
+metrics <- unique(all_pollutants$metric)
+results <- list()
+
+for (yr in years) {
+  dat_year <- all_pollutants %>% filter(Year == yr)
+  
+  for (met in metrics) {
+    dat <- dat_year %>% filter(metric == met)
+    if (nrow(dat) < 5) next  # skip if too few stations
+    
+    sfst <- st_as_sf(dat, coords=c("Longitude","Latitude"), crs=4326) %>%
+      st_transform(common_crs)
+    spdf <- as(sfst, "Spatial")
+    spdf$val <- dat$val
+    
+    # drop NAs
+    spdf <- spdf[!is.na(spdf$val), ]
+    
+    v_emp <- variogram(val ~ 1, data = spdf)
+    v_mod <- vgm(
+      psill  = var(spdf$val, na.rm=TRUE),
+      model  = "Exp",
+      range  = 50000,
+      nugget = 0.2 * var(spdf$val, na.rm=TRUE)
+    )
+    
+    kr <- krige(
+      val ~ 1,
+      locations = spdf,
+      newdata   = grid_pts,
+      model     = v_mod
+    )
+    
+    df_kr  <- data.frame(
+      x = coordinates(kr)[,1],
+      y = coordinates(kr)[,2],
+      pred = kr$var1.pred
+    )
+    r_pred <- rasterFromXYZ(df_kr, crs=common_crs) %>%
+      crop(extent(phu)) %>%
+      mask(phu)
+    
+    wm <- exact_extract(
+      r_pred,
+      phu,
+      fun     = "weighted_mean",
+      weights = pop_masked
+    )
+    
+    results[[paste(yr, met, sep = "_")]] <- tibble(
+      year      = yr,
+      PHU       = phu$PHU,
+      metric    = met,
+      popw_mean = wm
+    )
+  }
+}
+
+
+```
+
+6.  Bind all
+
+```{r, echo=FALSE}
+final_tbl <- bind_rows(results)
+
+```
+
+7.Check results
+
+```{r, echo=FALSE}
+tibble::glimpse(final_tbl)
+
+head(final_tbl, 10)
+
+sum(is.nan(final_tbl$popw_mean))
+
+```
+
+```{r, echo=FALSE}
+
+nan_rows <- final_tbl %>% 
+  filter(is.nan(popw_mean))
+
+print(nan_rows)
+
+
+```
+8.Save as csv file
+
+```{r, echo=FALSE}
+write_csv(final_tbl, "PHU_PM25_NO2_O3_blockkriging_popw_2013_2022.csv")
+```
+
+
