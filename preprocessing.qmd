@@ -20,7 +20,7 @@ library(stringr)
 library(progressr)
 ```
 
-### O3 in 2013
+### Reading in All Pollutant Datasets Across Years
 
 ```{r, message=FALSE}
 # air_pollutants to process
@@ -45,6 +45,7 @@ for (i in seq_len(nrow(combinations))) {
 }
 ```
 
+### Processing All Pollutatnt Datasets Across Years
 
 ```{r}
 
@@ -165,7 +166,7 @@ with_progress({
     filename <- sprintf(
       "cleaned_datasets/%s_%d_ontario_annual_by_station.csv",
       pollutant,
-      yr
+      years
     )
         
     # Split annual summary by year and save with correct names
