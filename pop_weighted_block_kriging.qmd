@@ -9,7 +9,9 @@ editor: visual
 knitr::opts_chunk$set(echo = TRUE)
 options(tigris_use_cache = TRUE)
 ```
-1. Load libraries
+
+1.  Load libraries
+
 ```{r, message=FALSE, include=FALSE}
 library(sf)
 library(sp)
@@ -19,7 +21,8 @@ library(exactextractr)
 library(tidyverse)
 library(dplyr)
 ```
-2. Read and prepare PHU boundaries & population raster
+
+2.  Read and prepare PHU boundaries & population raster
 
 ```{r,echo=FALSE}
 unzip("PHU_BOUNDARY.zip", exdir = "PHU_BOUNDARY")
@@ -36,7 +39,8 @@ phu      <- st_transform(phu, common_crs)
 pop_rast <- pop_rast %>% crop(extent(phu)) %>% mask(phu)
 
 ```
-3. Read and combine all pollutants
+
+3.  Read and combine all pollutants
 
 ```{r, include=FALSE}
 pollutants <- c("PM2.5", "NO2", "O3")
@@ -83,7 +87,8 @@ for (pol in pollutants) {
 all_pollutants <- bind_rows(all_data)
 
 ```
-4. Create spatial grid
+
+4.  Create spatial grid
 
 ```{r,echo=FALSE}
 pop_masked <- pop_rast %>% crop(extent(phu)) %>% mask(phu)
@@ -91,7 +96,7 @@ grid_pts   <- rasterToPoints(pop_masked, spatial=TRUE)
 
 ```
 
-5. Kriging per year & metric
+5.  Kriging per year & metric
 
 ```{r, echo=FALSE}
 
@@ -184,10 +189,9 @@ print(nan_rows)
 
 
 ```
+
 8.Save as csv file
 
 ```{r, echo=FALSE}
 write_csv(final_tbl, "PHU_PM25_NO2_O3_blockkriging_popw_2013_2022.csv")
 ```
-
-
