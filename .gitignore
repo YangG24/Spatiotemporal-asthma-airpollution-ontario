@@ -211,7 +211,6 @@ __marimo__/
 *.pdf
 *.zip
 *.txt
-*.csv
 ~$*
 
 # Ignore data folders (if you don't want to upload them)
