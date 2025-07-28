@@ -1,0 +1,163 @@
+---
+title: "6500 Project: Asthma Incidence Analysis_merging dataset"
+author: "Group 5"
+format: pdf
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tigris_use_cache = TRUE)
+```
+
+1.  Load libraries
+
+```{r, message=FALSE, include=FALSE}
+library(readr)     # for read_csv()
+library(readxl)    # for read_xlsx()
+library(dplyr)     # for data manipulation
+library(tibble)    # for tribble()
+library(tidyr)     # for pivot_wider()
+```
+
+2.  Read the population‑weighted block kriging results
+
+```{r,echo=FALSE}
+popw_mean <- read_csv("PHU_PM25_NO2_O3_blockkriging_popw_2013_2022.csv")
+
+#    Extract the unique PHU names for later matching
+unique_PHUs <- unique(popw_mean$PHU)
+```
+
+3.  Read asthma data
+
+```{r, echo=FALSE}
+# 1) Read just the header of the asthma Excel file to get column names
+header <- read_xlsx(
+  "Asthma_Ontario_2013_2022.xlsx",
+  skip      = 2,
+  col_names = TRUE,
+  n_max     = 0
+)
+cols <- names(header)
+
+# 2) Build a col_types vector that skips the 10th column (J) at import
+ct <- rep("guess", length(cols))
+ct[10] <- "skip"
+
+# 3) Now read the full asthma data, dropping column J entirely
+asthma_raw <- read_xlsx(
+  "Asthma_Ontario_2013_2022.xlsx",
+  skip      = 2,
+  col_names = TRUE,
+  col_types = ct
+)
+
+# 4) Filter to keep only the rows we care about
+asthma_filt <- asthma_raw %>%
+  filter(
+    Indicator == "Incidence of asthma",
+    Measure   == "Standardized incidence ratio (both sexes)"
+  )
+
+```
+
+4.  Define a manual mapping for PHU names that don’t match exactly
+
+```{r,echo=FALSE}
+mapping <- tribble(
+  ~Geography,                                                  ~PHU,
+  "Huron Perth Public Health",                                 "Huron Perth Health Unit",
+  "Region of Waterloo Public Health and Paramedic Services",   "Region of Waterloo, Public Health",
+  "City of Hamilton Public Health Services",                   "Hamilton Public Health Services",
+  "Public Health Sudbury & Districts",                         "Sudbury and District Health Unit",
+  "Hastings Prince Edward Public Health",                      "Hastings and Prince Edward Counties Health Unit",
+  "Chatham-Kent Public Health",                                "Chatham-Kent Health Unit",
+  "Leeds, Grenville & Lanark District Health Unit",            "Leeds, Grenville and Lanark District Health Unit",
+  "Wellington-Dufferin-Guelph Public Health",                  "Wellington-Dufferin-Guelph Health Unit",
+  "Halton Region Public Health",                               "Halton Region Health Department",
+  "Grey Bruce Public Health",                                  "Grey Bruce Health Unit",
+  "Niagara Region Public Health",                              "Niagara Region Public Health Department",
+  "Algoma Public Health",                                      "Algoma Public Health Unit",
+  "Kingston, Frontenac and Lennox & Addington Public Health",  "Kingston, Frontenac and Lennox and Addington Health Unit"
+)
+
+
+```
+
+5.  Join the manual mapping, then fall back to exact matches against unique_PHUs
+
+```{r, echo=FALSE}
+
+asthma_std <- asthma_filt %>%
+  left_join(mapping, by = "Geography") %>%
+  mutate(
+    PHU_final = coalesce(
+      PHU, 
+      if_else(Geography %in% unique_PHUs, Geography, NA_character_)
+    )
+  ) %>%
+  filter(!is.na(PHU_final))   # keep only those with a matched PHU
+
+# Check all unique PHU_final values (should be all units that matched,both exact and manually mapped)
+all_matched_PHUs <- unique(asthma_std$PHU_final)
+print(all_matched_PHUs)
+
+#  Count how many distinct units matched
+cat("Number of distinct PHUs matched:", length(all_matched_PHUs), "\n")
+
+```
+
+6.  Clean up column names and ensure 'year' is numeric for the join
+
+```{r, echo=FALSE}
+asthma_clean <- asthma_std %>%
+  select(-PHU) %>%            # drop the temporary mapping column
+  rename(
+    PHU  = PHU_final,         # use the standardized PHU names
+    year = Year               # bring in the Year column
+  ) %>%
+  mutate(
+    year = as.numeric(year)   # convert to numeric so it matches popw_wide
+  )
+
+```
+
+7. Pivot the pollution data into wide format (one column per metric)
+
+```{r, echo=FALSE}
+popw_wide <- popw_mean %>%
+  pivot_wider(
+    id_cols     = c(year, PHU),
+    names_from  = metric,     # e.g. PM25_3h, NO2_8h, etc.
+    values_from = popw_mean
+  )
+
+```
+
+8. Merge asthma rates with pollution exposures by year + PHU
+
+```{r, echo=FALSE}
+df_model <- asthma_clean %>%
+  inner_join(popw_wide, by = c("year", "PHU"))
+
+# Check the final dataset 
+glimpse(df_model)
+
+```
+
+8. Safely drop Geography column
+
+```{r, echo=FALSE}
+df_model <- df_model %>%
+  select(-Geography)
+
+str(df_model)
+
+```
+
+9. Save as csv file
+
+```{r, echo=FALSE}
+write_csv(df_model, "Merged_dataset_2013_2022.csv")
+```
