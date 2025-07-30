@@ -82,7 +82,6 @@ mapping <- tribble(
   "Kingston, Frontenac and Lennox & Addington Public Health",  "Kingston, Frontenac and Lennox and Addington Health Unit"
 )
 
-
 ```
 
 5.  Join the manual mapping, then fall back to exact matches against unique_PHUs
@@ -123,7 +122,7 @@ asthma_clean <- asthma_std %>%
 
 ```
 
-7. Pivot the pollution data into wide format (one column per metric)
+7.  Pivot the pollution data into wide format (one column per metric)
 
 ```{r, echo=FALSE}
 popw_wide <- popw_mean %>%
@@ -135,7 +134,7 @@ popw_wide <- popw_mean %>%
 
 ```
 
-8. Merge asthma rates with pollution exposures by year + PHU
+8.  Merge asthma rates with pollution exposures by year + PHU
 
 ```{r, echo=FALSE}
 df_model <- asthma_clean %>%
@@ -146,7 +145,7 @@ glimpse(df_model)
 
 ```
 
-8. Safely drop Geography column
+8.  Safely drop Geography column
 
 ```{r, echo=FALSE}
 df_model <- df_model %>%
@@ -156,7 +155,7 @@ str(df_model)
 
 ```
 
-9. Save as csv file
+9.  Save as csv file
 
 ```{r, echo=FALSE}
 write_csv(df_model, "Merged_dataset_2013_2022.csv")

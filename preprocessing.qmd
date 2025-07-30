@@ -45,7 +45,8 @@ for (i in seq_len(nrow(combinations))) {
 }
 ```
 
-### Processing All Pollutatnt Datasets Across Years
+
+### Processing All Pollutant Datasets Across Years
 
 ```{r}
 

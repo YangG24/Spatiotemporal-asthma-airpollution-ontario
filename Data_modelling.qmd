@@ -1,0 +1,309 @@
+---
+title: "Data Modelling"
+author: "Ernest N Frimpong"
+format: html
+editor: visual
+---
+
+### Loading in Libraries
+
+```{r, message=FALSE, echo=FALSE}
+# Load required packages
+library(caret)    
+library(tidyverse)
+library(dplyr)
+library(mgcv)
+library(ggplot2)
+library(tmap)
+library(leaflet)
+library(readr)    
+library(readxl) 
+library(sf)
+library(viridis)
+library(patchwork)
+```
+
+### Loading & Joining Up Datasets 
+
+```{r, message=FALSE, echo=FALSE}
+# Read PHU shapefile and kriging results
+phu <- st_read(list.files("PHU_BOUNDARY", "\\.shp$", full.names = TRUE)[1]) %>%
+  rename(PHU = NAME_ENG) %>% 
+  st_make_valid() %>% 
+  st_centroid() %>% 
+  select(PHU_ID, PHU, geometry)
+
+# asthma pollutant data
+asthma_pollutant_data = read_csv("Merged_dataset_2013_2022.csv")
+
+# full data joins
+asthma_phu_pollutant = asthma_pollutant_data %>% 
+  left_join(phu, by = "PHU") %>% 
+  mutate(
+    year_factor = as.factor(year),
+    other_pop = Population,
+    rate_computed = (Count / Population) * 100
+  )
+
+coords = st_coordinates(asthma_phu_pollutant$geometry)
+
+
+asthma_phu_pollutant$X = coords[,1]
+asthma_phu_pollutant$Y = coords[,2]
+```
+
+### Plotting spatial asthma incidences
+
+```{r, message=FALSE, echo=FALSE, fig.width=16, fig.height=7}
+ggplot(asthma_phu_pollutant, aes(x = year, y = rate_computed, group = PHU, color = PHU)) +
+  geom_line(alpha = 0.3) +
+  theme_minimal()
+```
+
+```{r, echo=FALSE, message=FALSE, fig.width=10, fig.height=8}
+
+# scaling all predictors
+asthma_phu_pollutant <- asthma_phu_pollutant %>%
+  mutate(across(c(PM25_8h, NO2_8h, O3_8h, PM25_3h, NO2_3h, O3_3h, Population), scale))
+
+# Set seed for reproducibility
+set.seed(123)
+
+# adding a small nudge in incidence rates
+epsilon = 1e-5
+
+asthma_phu_pollutant$log_rate = log(asthma_phu_pollutant$rate_computed + epsilon)
+
+# # # Add spatial clusters within each PHU-year combination
+# # asthma_phu_pollutant <- asthma_phu_pollutant %>%
+# #   group_by(year) %>%
+# #   mutate(
+# #     spatial_cluster = kmeans(cbind(X, Y), centers = min(2, n()))$cluster
+# #   ) %>%
+# #   ungroup()
+# 
+# # Create strata with PHU, year, and spatial cluster
+# asthma_phu_pollutant$strata <- interaction(
+#   asthma_phu_pollutant$year
+#   # asthma_phu_pollutant$spatial_cluster
+# )
+
+
+# 
+# # Perform the stratified sampling
+# train_data <- asthma_phu_pollutant %>%
+#   group_by(strata) %>%
+#   sample_frac(0.8) %>%
+#   ungroup()
+# 
+# test_data <- anti_join(asthma_phu_pollutant, train_data)
+
+asthma_phu_pollutant
+
+train_data = asthma_phu_pollutant %>% 
+  filter(year != 2022)
+
+test_data = asthma_phu_pollutant %>% 
+  filter(year == 2022)
+
+train_data
+
+test_data
+```
+
+
+
+### Modelling Spatial-Temporal Results
+
+```{r, echo=FALSE, message=FALSE, fig.width=10, fig.height=8}
+
+# 8 hour average, model 1 and 2 comparisons
+model1 <- gam(rate_computed ~ PM25_8h + NO2_8h + O3_8h + s(X, Y, bs = "tp") +
+                s(year_factor, bs = "re") + te(X, Y, year), data = train_data, method = "REML")
+
+model2 <- gam(rate_computed ~ PM25_8h + NO2_8h + O3_8h + s(X, Y, bs = "tp") +
+              s(year_factor, bs = "re") + te(X, Y, year) + ti(PM25_8h, O3_8h) + ti(PM25_8h, NO2_8h) + ti(NO2_8h, O3_8h), data = train_data, method = "REML")
+
+# 8 hour average, model 1 and 2 comparisons
+model_log1 <- gam(log_rate ~ PM25_8h + NO2_8h + O3_8h + s(X, Y, bs = "tp") +
+                s(year_factor, bs = "re") + te(X, Y, year), data = train_data, method = "REML")
+
+model_log2 <- gam(log_rate ~ PM25_8h + NO2_8h + O3_8h + s(X, Y, bs = "tp") +
+              s(year_factor, bs = "re") + te(X, Y, year) + ti(PM25_8h, O3_8h) + ti(PM25_8h, NO2_8h) + ti(NO2_8h, O3_8h), data = train_data, method = "REML")
+
+# 8 hour average, model 1 and 2 comparisons
+model_count1 <- gam(Count ~ PM25_8h + NO2_8h + O3_8h + Population + s(X, Y, bs = "tp") + s(year_factor, bs = "re") + te(X, Y, year), data = train_data, method = "REML")
+
+model_count2 <- gam(Count ~ PM25_8h + NO2_8h + O3_8h + Population + s(X, Y, bs = "tp") +
+              s(year_factor, bs = "re") + te(X, Y, year) + ti(PM25_8h, O3_8h) + ti(PM25_8h, NO2_8h) + ti(NO2_8h, O3_8h), data = train_data, method = "REML")
+
+
+
+
+
+# 3 hour average, model 1 and 2 comparisons
+model1a <- gam(rate_computed ~ PM25_3h + NO2_3h + O3_3h + s(X, Y, bs = "tp") +
+                s(year_factor, bs = "re") + te(X, Y, year), data = train_data, method = "REML")
+
+model2a <- gam(rate_computed ~ PM25_3h + NO2_3h + O3_3h + s(X, Y, bs = "tp") +
+              s(year_factor, bs = "re") + te(X, Y, year) + ti(PM25_3h, O3_3h) + ti(PM25_3h, NO2_3h) + ti(NO2_3h, O3_3h), data = train_data, method = "REML")
+
+
+model_log1a <- gam(log_rate ~ PM25_3h + NO2_3h + O3_3h + s(X, Y, bs = "tp") +
+                s(year_factor, bs = "re") + te(X, Y, year), data = train_data, method = "REML")
+
+model_log2a <- gam(log_rate ~ PM25_3h + NO2_3h + O3_3h + s(X, Y, bs = "tp") +
+              s(year_factor, bs = "re") + te(X, Y, year) + ti(PM25_3h, O3_3h) + ti(PM25_3h, NO2_3h) + ti(NO2_3h, O3_3h), data = train_data, method = "REML")
+
+# 8 hour average, model 1 and 2 comparisons
+model_count1a <- gam(Count ~ PM25_3h + NO2_3h + O3_3h  + Population + s(X, Y, bs = "tp") + s(year_factor, bs = "re") + te(X, Y, year), data = train_data, method = "REML")
+
+model_count2a <- gam(Count ~ PM25_3h + NO2_3h + O3_3h  + Population + s(X, Y, bs = "tp") + s(year_factor, bs = "re") + te(X, Y, year) + ti(PM25_3h, O3_3h) + ti(PM25_3h, NO2_3h) + ti(NO2_3h, O3_3h), data = train_data, method = "REML")
+
+
+
+# comparing models to take better out of prediction performance
+AIC(model_log1, model_log2)
+AIC(model_log1a, model_log2a)
+
+AIC(model1, model2)
+AIC(model1a, model2a)
+
+AIC(model_count1, model_count2)
+AIC(model_count1a, model_count2a)
+
+plot(model_count1, pages = 1, scheme = 1)
+```
+
+
+```{r}
+print(summary(model_log1))
+```
+
+
+
+```{r, message=FALSE, echo=FALSE}
+
+# Read PHU shapefile and kriging results
+phu <- st_read(list.files("PHU_BOUNDARY", "\\.shp$", full.names = TRUE)[1]) %>%
+  rename(PHU = NAME_ENG)
+
+# 1. Ensure consistent CRS
+phu <- st_transform(phu, st_crs("EPSG:4326")) # Or your appropriate CRS
+
+test_data <- st_transform(test_data, st_crs("EPSG:4326"))
+
+# prediction
+pred_matrix = predict(
+  model_log1, 
+  newdata = test_data, 
+  type = "terms")
+
+test_data$full_pred = predict(model_log1, newdata = test_data, type = "link")
+
+# Extracting components
+test_data$intercept = attr(pred_matrix, "constant")
+test_data$smooth_XY = pred_matrix[, "s(X,Y)"]
+
+test_data$marginal_pred = test_data$full_pred - test_data$intercept
+
+
+# Convert back to regular rate
+test_data$full_pred_rate <- exp(test_data$full_pred) - epsilon - 1
+test_data$full_pred = round(abs((test_data$full_pred_rate / 100) * test_data$other_pop))
+
+test_data$marginal_pred <- exp(test_data$marginal_pred) - epsilon - 1
+test_data$marginal_pred = round(abs((test_data$marginal_pred / 100) * test_data$other_pop))
+
+test_data$actual_rate <- exp(test_data$log_rate) - epsilon - 1
+
+test_data
+```
+
+
+```{r, fig.width=15, fig.height=8}
+# joining up both datasets for plotting
+phu_plot <- phu %>%
+  left_join(test_data, by = "PHU") %>% 
+  select(-PHU_ID.x, -geometry.x)
+
+diff_marg_pred = round(((max(phu_plot$marginal_pred) - min(phu_plot$marginal_pred)) / 4))
+diff_full_pred = round(((max(phu_plot$full_pred) - min(phu_plot$full_pred)) / 4))
+
+# Visualization showing complete PHU coverage
+p1 = ggplot() +
+  # Plot all PHU boundaries
+  geom_sf(data = phu_plot, fill = NA, color = "gray70", linewidth = 0.3) +
+
+  # Plot smooth terms
+  geom_sf(data = phu_plot, aes(fill = marginal_pred), size = 2) +
+  
+  scale_fill_viridis_c(option = "C", 
+                       name = "Marginal Predictions", 
+                       na.value = NA,
+                       limits = c(min(phu_plot$marginal_pred), max(phu_plot$marginal_pred)),
+                       breaks = seq(min(phu_plot$marginal_pred), max(phu_plot$marginal_pred), by = diff_marg_pred)) +
+
+  labs(title = "2022 Marginal Predictions Across PHUs",
+       color = "Spatial Effect") +
+  
+  theme(legend.position = "right",
+        legend.title = "Spatial Predictions") +
+
+  theme_minimal()
+
+
+p2 = ggplot() +
+  # Plot all PHU boundaries
+  geom_sf(data = phu_plot, fill = NA, color = "gray70", linewidth = 0.3) +
+
+  # Plot smooth terms
+  geom_sf(data = phu_plot, aes(fill = full_pred), size = 2) +
+  
+  scale_fill_distiller(palette = "YlOrRd", 
+                       direction = 1, 
+                       name = "Total Predictions", 
+                       na.value = NA,
+                       limits = c(min(phu_plot$full_pred), max(phu_plot$full_pred)),
+                       breaks = seq(min(phu_plot$full_pred), max(phu_plot$full_pred), by = diff_full_pred)) +
+
+  labs(title = "2022 Total Predictions Across PHUs",
+       color = "Spatial Effect") +
+  
+  theme(legend.position = "right",
+        legend.title = "Total Predictions") +
+
+  theme_minimal()
+
+# placing plots side by side
+combined_plot = p1 + p2 +
+  plot_layout(guides = "collect")
+
+
+combined_plot
+
+```
+
+
+```{r}
+
+# Calculate error metrics
+test_data$error = test_data$actual_rate - test_data$full_pred_rate
+test_data$abs_error = abs(test_data$error)
+
+# Common metrics
+MAE = mean(test_data$abs_error)
+RMSE = sqrt(mean(test_data$error^2))
+MAPE = mean(abs(test_data$error) / test_data$actual_rate) * 100
+
+MAE
+RMSE
+MAPE
+
+
+rmse_pop_errors = (RMSE/100) * phu_plot$other_pop
+rmse_pop_errors = sum(rmse_pop_errors) / 34
+
+rmse_pop_errors
+```
+

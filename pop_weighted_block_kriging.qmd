@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 options(tigris_use_cache = TRUE)
 ```
 
-1.  Load libraries
+### Load libraries
 
 ```{r, message=FALSE, include=FALSE}
 library(sf)
@@ -20,9 +20,22 @@ library(gstat)
 library(exactextractr)
 library(tidyverse)
 library(dplyr)
+
+
+library(stars)
+library(sp)
+library(gstat)
+library(spatstat)
+library(terra)
+library(raster)
+library(grid)
+library(ggplot2)
+library(viridis)
+library(patchwork)
+library(readr)
 ```
 
-2.  Read and prepare PHU boundaries & population raster
+### Read and prepare PHU boundaries & population raster
 
 ```{r,echo=FALSE}
 unzip("PHU_BOUNDARY.zip", exdir = "PHU_BOUNDARY")
@@ -37,10 +50,9 @@ common_crs <- crs(pop_rast)
 
 phu      <- st_transform(phu, common_crs)
 pop_rast <- pop_rast %>% crop(extent(phu)) %>% mask(phu)
-
 ```
 
-3.  Read and combine all pollutants
+## Read and combine all pollutants
 
 ```{r, include=FALSE}
 pollutants <- c("PM2.5", "NO2", "O3")
@@ -79,7 +91,7 @@ for (pol in pollutants) {
     mutate(
       metric = ifelse(avg_type == "val_3h", metric_3h, metric_8h)
     ) %>%
-    select(Year, Latitude, Longitude, metric, val)
+    dplyr::select(Year, Latitude, Longitude, metric, val)
   
   all_data[[pol]] <- df
 }
@@ -88,7 +100,7 @@ all_pollutants <- bind_rows(all_data)
 
 ```
 
-4.  Create spatial grid
+## Create spatial grid
 
 ```{r,echo=FALSE}
 pop_masked <- pop_rast %>% crop(extent(phu)) %>% mask(phu)
@@ -96,7 +108,7 @@ grid_pts   <- rasterToPoints(pop_masked, spatial=TRUE)
 
 ```
 
-5.  Kriging per year & metric
+## Kriging per year & metric
 
 ```{r, echo=FALSE}
 
@@ -109,7 +121,9 @@ for (yr in years) {
   
   for (met in metrics) {
     dat <- dat_year %>% filter(metric == met)
-    if (nrow(dat) < 5) next  # skip if too few stations
+    if (nrow(dat) < 5) next  # skip if too few stations.....why?
+    
+    # why crs 4326 and not Canada's Ontario CRS which is EPSG:3161?
     
     sfst <- st_as_sf(dat, coords=c("Longitude","Latitude"), crs=4326) %>%
       st_transform(common_crs)
@@ -153,6 +167,7 @@ for (yr in years) {
     results[[paste(yr, met, sep = "_")]] <- tibble(
       year      = yr,
       PHU       = phu$PHU,
+      # Why are geographic locations not included in the final results? 
       metric    = met,
       popw_mean = wm
     )
@@ -162,14 +177,67 @@ for (yr in years) {
 
 ```
 
-6.  Bind all
+```{r}
+kr
+
+r_pred
+
+wm
+
+results$`2016_NO2_3h`
+
+kr <- st_as_sf(kr)
+
+
+class(kr)
+```
+
+```{r}
+# Convert kriging results to stars raster
+ordinary_krige_raster <- st_rasterize(
+  kr["var1.pred"],
+  nx = 40, ny = 40  # Manually setting grid dimensions
+)
+
+ordinary_krige_raster
+```
+
+```{r}
+phu
+
+# Define your bounding box as an sf bbox object
+bbox <- st_bbox(c(
+  xmin = -95.14708,
+  ymin = 41.72875,
+  xmax = -74.34708,
+  ymax = 56.85375
+), crs = st_crs(phu))  # Use the same CRS as kr_sf
+
+# Crop the kriging result to the bounding box
+phu_cropped <- st_crop(phu, bbox)
+```
+
+```{r}
+ggplot() +
+  geom_stars(data = ordinary_krige_raster,
+             aes(fill = var1.pred)) +
+  geom_sf(data = st_boundary(phu_cropped)) +
+  # geom_sf(data = sample_n(b_horizon_pts, 1000), color = "red", size = 1, alpha = 0.6) +
+  coord_sf(lims_method = "geometry_bbox") +
+  # scale_fill_viridis_c(name = "pH", na.value = NA) +
+  xlab(NULL) + ylab(NULL) +
+  theme_minimal() 
+```
+
+## Bind all
 
 ```{r, echo=FALSE}
 final_tbl <- bind_rows(results)
 
+final_tbl
 ```
 
-7.Check results
+### Check results
 
 ```{r, echo=FALSE}
 tibble::glimpse(final_tbl)
@@ -187,11 +255,99 @@ nan_rows <- final_tbl %>%
 
 print(nan_rows)
 
-
 ```
 
-8.Save as csv file
+### Save as csv file
 
 ```{r, echo=FALSE}
 write_csv(final_tbl, "PHU_PM25_NO2_O3_blockkriging_popw_2013_2022.csv")
+```
+
+### Plotting block kriging results and Saving it as a .png
+
+```{r, fig.width=15, fig.height=12, message=FALSE}
+
+# Read PHU shapefile and kriging results
+phu <- st_read(list.files("PHU_BOUNDARY", "\\.shp$", full.names = TRUE)[1]) %>%
+  rename(PHU = NAME_ENG)
+
+kriged_data <- read_csv("PHU_PM25_NO2_O3_blockkriging_popw_2013_2022.csv")
+
+# Pick year to plot
+chosen_year <- 2022
+
+# Get unique metrics
+metrics <- unique(kriged_data$metric)
+
+# Loop to generate PHU-level choropleth maps
+plots <- lapply(metrics, function(met) {
+  df <- kriged_data %>%
+    filter(year == chosen_year, metric == met)
+  
+  phu_plot <- phu %>%
+    left_join(df, by = "PHU")
+  
+  fill_scale <- switch(
+  met,
+  "PM25_3h" = scale_fill_viridis_c(option = "C", name = "PM25_3h", na.value = NA),
+  "PM25_8h" = scale_fill_viridis_c(option = "C", name = "PM25_8h", na.value = NA),
+
+  "NO2_3h"  = scale_fill_gradient(low = "green", high = "red", name = "NO2_3h", na.value = NA),
+  "NO2_8h"  = scale_fill_gradient(low = "green", high = "red", name = "NO2_8h", na.value = NA),
+
+  "O3_3h"   = scale_fill_distiller(palette = "YlOrRd", direction = 1, name = "O3_3h", na.value = NA),
+  "O3_8h"   = scale_fill_distiller(palette = "YlOrRd", direction = 1, name = "O3_8h", na.value = NA),
+  scale_fill_viridis_c(option = "D", name = met, na.value = NA) # fallback
+  )
+  
+  ggplot(phu_plot) +
+    geom_sf(aes(fill = popw_mean), color = "black", size = 0.3) +
+    fill_scale +
+
+
+    # scale_fill_gradient(low = "green", high = "red", name = met, na.value = NA) +
+    # scale_fill_viridis(name = met, na.value = NA, option = "A") +
+    
+    labs(
+      title = paste("PHU-level", met, "in", chosen_year),
+      x = NULL, y = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(legend.position = "bottom",
+          panel.background = element_rect(fill = "grey95", color = NA),
+          plot.background = element_rect(fill = "grey95", color = NA),
+          legend.background = element_rect(fill = "grey95", color = NA),
+          
+          # legend.key.width = unit(1.5, "cm"),
+          # legend.text = element_text(size = 8),
+          axis.text = element_blank(),
+          # axis.ticks = element_blank(),
+          panel.grid = element_blank(),
+          aspect.ratio = 0.6) +
+    
+    guides(fill = guide_colorbar(barwidth = 10, barheight = 1))
+})
+
+
+# wrapping up plots to be captured in one grid
+image = wrap_plots(plots, ncol = 2) +
+  plot_annotation(
+    caption = "Data Source: Population weighted annual mean pollutant estimates across Ontario PHUs. Across all three pollutants, 
+    regardless of the 3 hour or 8 hour max, air pollution is higher towards the southern regions of Ontario. 
+    This is also confirmed for all years covered (2013 to 2021, not shown in the plot above) including 2022."
+  ) &
+  theme(
+    plot.background = element_rect(fill = "grey95", color = NA),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    legend.background = element_rect(fill = "grey95", color = NA)
+  )
+
+
+# Saving image for presentation slides
+ggsave("phu_pollution_2022.png",
+       plot = image,
+       width = 10, height = 8,
+       dpi = 300,
+       bg = "grey95")
+
 ```
